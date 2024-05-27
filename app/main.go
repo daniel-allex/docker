@@ -5,57 +5,84 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 )
 
-// Usage: your_docker.sh run <image> <command> <arg1> <arg2> ...
-func main() {
-	// Debugging print statements
-	// fmt.Println("Logs from your program will appear here!")
+func isolateDirectory(path string) error {
+	if err := syscall.Chroot(path); err != nil {
+		return err
+	}
 
-	command := os.Args[3]
-	args := os.Args[4:]
+	if err := syscall.Chdir("/"); err != nil {
+		return err
+	}
 
-	cmd := exec.Command(command, args...)
+	return nil
+}
+
+func copyExecutable(command string, path string) error {
+	originalPath, err := os.Open(command)
+	if err != nil {
+		return err
+	}
+
+	newPath, err := os.OpenFile(filepath.Join(path, "executable"), os.O_WRONLY|os.O_CREATE, 0777)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.Copy(newPath, originalPath)
+	if err != nil {
+		return err
+	}
+
+	err = originalPath.Close()
+	if err != nil {
+		return err
+	}
+
+	err = newPath.Close()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func runExecutable(args []string) {
+	cmd := exec.Command("./executable", args...)
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 	cmd.Stdin = os.Stdin
 
-	original_path, err := os.Open(command)
-	if err != nil {
-		fmt.Println("failed to open command binary:", err.Error())
-		os.Exit(1)
-	}
-
-	if err = os.Mkdir("/docker-fs", 0755); err != nil {
-		fmt.Println("failed to mkdir:", err.Error())
-		os.Exit(1)
-	}
-
-	if err = syscall.Chroot("/docker-fs"); err != nil {
-		fmt.Println("failed to chroot:", err.Error())
-		os.Exit(1)
-	}
-
-	if err = syscall.Chdir("/"); err != nil {
-		fmt.Println("failed to chdir:", err.Error())
-		os.Exit(1)
-	}
-
-	new_path, err := os.OpenFile("executable", os.O_WRONLY|os.O_CREATE, 0777)
-	if err != nil {
-		fmt.Println("failed to open copy location:", err.Error())
-		os.Exit(1)
-	}
-
-	_, err = io.Copy(new_path, original_path)
-	if err != nil {
-		fmt.Println("failed to copy file:", err.Error())
-		os.Exit(1)
-	}
-
-	if err = cmd.Run(); err != nil {
-		fmt.Println("Err:", err)
+	if err := cmd.Run(); err != nil {
 		os.Exit(cmd.ProcessState.ExitCode())
 	}
+}
+
+// Usage: your_docker.sh run <image> <command> <arg1> <arg2> ...
+func main() {
+	command := os.Args[3]
+	args := os.Args[4:]
+
+	tempPath, err := os.MkdirTemp("", "docker-fs")
+	if err != nil {
+		fmt.Printf("failed to create temporary dirpath: %v", err)
+		os.Exit(1)
+	}
+
+	err = copyExecutable(command, tempPath)
+	if err != nil {
+		fmt.Printf("failed to copy executable: %v", err)
+		os.Exit(1)
+	}
+
+	err = isolateDirectory(tempPath)
+	if err != nil {
+		fmt.Printf("failed to isolate directory: %v", err)
+		os.Exit(1)
+	}
+
+	runExecutable(args)
 }
